@@ -1,6 +1,6 @@
 /*
   Copyright (c) 2012-2016 Ant Micro <www.antmicro.com>
-  Copyright (c) 2020 - 2021, Konrad Kruczyński
+  Copyright (c) 2020 - 2021 Konrad Kruczyński
 
   Authors:
    * Konrad Kruczynski (kkruczynski@antmicro.com)
@@ -78,17 +78,8 @@ namespace Migrantoid
                 ForSurrogate<SurrogateForIXmlSerializable>().SetObject(x => x.Restore());
             }
 
-            ForObject(typeof(Hashtable)).SetSurrogate(x => new SurrogateForHashtable((Hashtable)x));
-            ForSurrogate<SurrogateForHashtable>().SetObject(x => x.Restore());
-
             ForObject(typeof(ReadOnlyCollection<>)).SetSurrogateGenericType(typeof(SurrogateForReadOnlyCollection<>));
             ForSurrogate(typeof(SurrogateForReadOnlyCollection<>)).SetObject(x => ((ISurrogateRestorer)x).Restore());
-
-            ForObject(typeof(Dictionary<,>)).SetSurrogateGenericType(typeof(SurrogateForDictionary<,>));
-            ForSurrogate(typeof(SurrogateForDictionary<,>)).SetObject(x => ((ISurrogateRestorer)x).Restore());
-
-            ForObject(typeof(HashSet<>)).SetSurrogateGenericType(typeof(SurrogateForHashSet<>));
-            ForSurrogate(typeof(SurrogateForHashSet<>)).SetObject(x => ((ISurrogateRestorer)x).Restore());
 
             AddRecipeFor(
                 (regex, writer) =>
@@ -274,11 +265,11 @@ namespace Migrantoid
                 lastException = ex;
                 return DeserializationResult.TypeStructureChanged;
             }
-            catch(Exception ex)
+            /*catch(Exception ex)
             {
                 lastException = ex;
                 return DeserializationResult.StreamCorrupted;
-            }
+            }*/
             finally
             {
                 reader.Flush();
@@ -567,6 +558,12 @@ namespace Migrantoid
                     var generator = new CloneContentMethodGenerator(t);
                     return generator.Generate();
                 });
+
+                readMethods.addHashCodeBasedDeferredElementProvider = new DynamicMethodProvider<AddDeferredHashCodeBasedElementDelegate>(t =>
+                {
+                    var generator = new AddDeferredElementToHashCodeBasedMethodGenerator(t);
+                    return generator.Generate();
+                });
             }
             else
             {
@@ -603,6 +600,23 @@ namespace Migrantoid
             readMethods.createObjectMethodsProvider = new DynamicMethodProvider<CreateObjectMethodDelegate>(t =>
             {
                 return () => ObjectReader.CreateObjectUsingReflection(t, treatCollectionAsUserObject);
+            });
+
+            readMethods.addHashCodeBasedDeferredElementProvider = new DynamicMethodProvider<AddDeferredHashCodeBasedElementDelegate>(t =>
+            {
+                return (hashCodeBased, key, value) =>
+                {
+                    var hashCodeBasedType = hashCodeBased.GetType();
+                    var addMethod = hashCodeBasedType.GetMethod("Add");
+                    if(addMethod.GetParameters().Length == 2)
+                    {
+                        addMethod.Invoke(hashCodeBased, new[] { key, value });
+                    }
+                    else
+                    {
+                        addMethod.Invoke(hashCodeBased, new[] { key });
+                    }
+                };
             });
             return readMethods;
         }
@@ -651,6 +665,7 @@ namespace Migrantoid
             public DynamicMethodProvider<CreateObjectMethodDelegate> createObjectMethodsProvider;
             public DynamicMethodProvider<TouchInlinedObjectMethodDelegate> touchInlinedObjectMethodsProvider;
             public DynamicMethodProvider<CloneMethodDelegate> cloneContentMehtodsProvider;
+            public DynamicMethodProvider<AddDeferredHashCodeBasedElementDelegate> addHashCodeBasedDeferredElementProvider;
         }
 
         /// <summary>

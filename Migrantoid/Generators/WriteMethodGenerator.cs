@@ -1,10 +1,12 @@
 /*
   Copyright (c) 2012 - 2016 Antmicro <www.antmicro.com>
+  Copyright (c) 2021 Konrad Kruczyński
 
   Authors:
    * Konrad Kruczynski (kkruczynski@antmicro.com)
    * Piotr Zierhoffer (pzierhoffer@antmicro.com)
    * Mateusz Holenko (mholenko@antmicro.com)
+   * Konrad Kruczyński (konrad.kruczynski@gmail.com)
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the
@@ -309,9 +311,43 @@ namespace Migrantoid.Generators
 
             context.Generator.PushLocalValueOntoStack(iteratorLocal);
             context.Generator.Emit(OpCodes.Callvirt, enumeratorType.GetProperty("Current").GetGetMethod());
-            context.Generator.StoreLocalValueFromStack(currentElementLocal);
 
-            GenerateWriteField(context, elementVariable, token.FormalElementType);
+            if (token.IsDictionary)
+            {
+                var elementKeyLocal = context.Generator.DeclareLocal(token.FormalKeyType);
+                var elementValueLocal = context.Generator.DeclareLocal(token.FormalValueType);
+                var keyVariable = new Variable(elementKeyLocal);
+                var valueVariable = new Variable(elementValueLocal);
+
+                var actualElementType = token.IsGeneric ? token.FormalElementType : typeof(DictionaryEntry);
+                var keyValuePairLocal = context.Generator.DeclareLocal(actualElementType);
+                if (actualElementType.IsValueType)
+                {
+                    if (!token.IsGeneric)
+                    {
+                        context.Generator.Emit(OpCodes.Unbox_Any, actualElementType);
+                    }
+
+                    context.Generator.StoreLocalValueFromStack(keyValuePairLocal);
+                    context.Generator.PushLocalAddressOntoStack(keyValuePairLocal);
+                }
+
+                context.Generator.Emit(OpCodes.Dup);
+
+                context.Generator.Emit(OpCodes.Call, actualElementType.GetProperty("Key").GetGetMethod());
+                context.Generator.StoreLocalValueFromStack(elementKeyLocal);
+                GenerateWriteField(context, keyVariable, token.FormalKeyType);
+
+                context.Generator.Emit(OpCodes.Call, actualElementType.GetProperty("Value").GetGetMethod());
+                context.Generator.StoreLocalValueFromStack(elementValueLocal);
+                GenerateWriteField(context, valueVariable, token.FormalValueType);
+            }
+            else
+            {
+                context.Generator.StoreLocalValueFromStack(currentElementLocal);
+                GenerateWriteField(context, elementVariable, token.FormalElementType);
+            }
+
             context.Generator.Emit(OpCodes.Br, loopBegin);
 
             context.Generator.MarkLabel(finish);

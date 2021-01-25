@@ -1,9 +1,11 @@
 ﻿/*
   Copyright (c) 2013-2016 Antmicro <www.antmicro.com>
+  Copyright (c) 2021 Konrad Kruczyński
 
   Authors:
    * Mateusz Holenko (mholenko@antmicro.com)
    * Konrad Kruczynski (kkruczynski@antmicro.com)
+   * Konrad Kruczyński (konrad.kruczynski@gmail.com)
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the
@@ -148,23 +150,18 @@ namespace Migrantoid.Generators
                 throw new InvalidOperationException(InternalErrorMessage);
             }
 
-            GenerateFillCollection(context, collectionToken.FormalElementType, formalType, objectIdLocal);
+            GenerateFillCollection(context, collectionToken, formalType, objectIdLocal);
         }
 
-        private static void GenerateFillCollection(ReaderGenerationContext context, Type elementFormalType, Type collectionType, LocalBuilder objectIdLocal)
+        private static void GenerateFillCollection(ReaderGenerationContext context, CollectionMetaToken collectionToken, Type collectionType, LocalBuilder objectIdLocal)
         {
             var countLocal = context.Generator.DeclareLocal(typeof(int));
 
             GenerateReadPrimitive(context, typeof(int));
             context.Generator.StoreLocalValueFromStack(countLocal); // read collection elements count
+            var addMethod = collectionToken.AddMethod;
 
-            var addMethod = collectionType.GetMethod("Add", new[] { elementFormalType }) ??
-                   collectionType.GetMethod("Enqueue", new[] { elementFormalType }) ??
-                   collectionType.GetMethod("Push", new[] { elementFormalType });
-            if(addMethod == null)
-            {
-                throw new InvalidOperationException(string.Format(CouldNotFindAddErrorMessage, collectionType));
-            }
+            var elementFormalType = collectionToken.FormalElementType;
 
             if(collectionType == typeof(Stack) ||
             (collectionType.IsGenericType && collectionType.GetGenericTypeDefinition() == typeof(Stack<>)))
@@ -191,7 +188,7 @@ namespace Migrantoid.Generators
                     context.Generator.PushLocalValueOntoStack(tempArrLocal);
                     context.Generator.PushLocalValueOntoStack(cl);
                     context.Generator.Emit(OpCodes.Ldelem, elementFormalType);
-                    context.Generator.Emit(OpCodes.Callvirt, collectionType.GetMethod("Push"));
+                    context.Generator.Emit(OpCodes.Callvirt, addMethod);
                 }, true);
             }
             else
@@ -200,8 +197,93 @@ namespace Migrantoid.Generators
                 {
                     context.PushDeserializedObjectOntoStack(objectIdLocal);
                     context.Generator.Emit(OpCodes.Castclass, collectionType);
-                    GenerateReadField(context, elementFormalType, false);
-                    context.Generator.Emit(OpCodes.Callvirt, addMethod);
+
+                    var currentIdLocal = default(LocalBuilder);
+                    var debtDifference = default(LocalBuilder);
+                    var valueLocal = default(LocalBuilder);
+
+                    if (collectionToken.IsHashCodeBased)
+                    {
+                        currentIdLocal = context.Generator.DeclareLocal(typeof(int));
+                        debtDifference = context.Generator.DeclareLocal(typeof(int));
+                    }
+
+                    if (collectionToken.IsDictionary)
+                    {
+                        valueLocal = context.Generator.DeclareLocal(collectionToken.FormalValueType);
+                    }
+
+                    if (collectionToken.IsHashCodeBased)
+                    {
+                        context.PushObjectReaderOntoStack();
+                        context.Generator.Call<ObjectReader>(or => or.GetNewestObjectId());
+                        context.Generator.StoreLocalValueFromStack(currentIdLocal);
+
+                        context.PushObjectReaderOntoStack();
+                        context.Generator.Call<ObjectReader>(or => or.GetObjectDebt());
+                        context.Generator.StoreLocalValueFromStack(debtDifference);
+                    }
+
+                    GenerateReadField(context, collectionToken.IsDictionary ? collectionToken.FormalKeyType : collectionToken.FormalElementType, false);
+
+                    if (collectionToken.IsHashCodeBased)
+                    {
+                        context.PushObjectReaderOntoStack();
+                        context.Generator.Call<ObjectReader>(or => or.GetObjectDebt());
+
+                        // Here we have new debt on top of the stack but need to load old one.
+                        context.Generator.PushLocalValueOntoStack(debtDifference);
+                        context.Generator.Emit(OpCodes.Sub);
+                        context.Generator.StoreLocalValueFromStack(debtDifference);
+                    }
+
+                    if (collectionToken.IsDictionary)
+                    {
+                        GenerateReadField(context, collectionToken.FormalValueType, false);
+
+                    }
+
+                    if (collectionToken.IsHashCodeBased)
+                    { 
+                        var deferredAddLabel = context.Generator.DefineLabel();
+                        var exitLabel = context.Generator.DefineLabel();
+                        context.Generator.PushLocalValueOntoStack(debtDifference);
+                        context.Generator.Emit(OpCodes.Brtrue, deferredAddLabel);
+
+                        context.Generator.Emit(OpCodes.Callvirt, addMethod);
+                        context.Generator.Emit(OpCodes.Br, exitLabel);
+
+                        context.Generator.MarkLabel(deferredAddLabel);
+
+                        if (collectionToken.IsDictionary)
+                        {
+                            context.Generator.StoreLocalValueFromStack(valueLocal);
+                        }
+
+                        context.Generator.Emit(OpCodes.Pop); // Key (or value if not dictionary)
+                        context.Generator.Emit(OpCodes.Pop); // Collection (object)
+                        context.PushObjectReaderOntoStack();
+                        context.PushDeserializedObjectOntoStack(objectIdLocal);
+                        context.Generator.PushLocalValueOntoStack(currentIdLocal);
+                        context.Generator.Emit(OpCodes.Ldc_I4_1);
+                        context.Generator.Emit(OpCodes.Add);
+                        if (collectionToken.IsDictionary)
+                        {
+                            context.Generator.PushLocalValueOntoStack(valueLocal);
+                        }
+                        else
+                        {
+                            context.Generator.Emit(OpCodes.Ldnull);
+                        }
+
+                        context.Generator.Call<ObjectReader>(or => or.AddHashCodeBasedWaitingValue(null, 0, null));
+
+                        context.Generator.MarkLabel(exitLabel);
+                    }
+                    else
+                    {
+                        context.Generator.Emit(OpCodes.Callvirt, addMethod);
+                    }
 
                     if(addMethod.ReturnType != typeof(void))
                     {
@@ -666,6 +748,6 @@ namespace Migrantoid.Generators
         }
 
         private const string InternalErrorMessage = "Internal error: should not reach here.";
-        private const string CouldNotFindAddErrorMessage = "Could not find suitable Add method for the type {0}.";
+        
     }
 }
