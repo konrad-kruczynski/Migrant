@@ -1,9 +1,11 @@
 /*
   Copyright (c) 2012 Ant Micro <www.antmicro.com>
+  Copyright (c) 2021 Konrad Kruczyński
 
   Authors:
    * Konrad Kruczynski (kkruczynski@antmicro.com)
    * Piotr Zierhoffer (pzierhoffer@antmicro.com)
+   * Konrad Kruczyński (konrad.kruczynski@gmail.com)
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the
@@ -362,6 +364,7 @@ namespace Migrantoid.Tests
             {
                 dictionary.Add(i, i + 1);
             }
+            
             var copy = SerializerClone(dictionary);
             CollectionAssert.AreEquivalent(dictionary, copy);
         }
@@ -1112,6 +1115,21 @@ namespace Migrantoid.Tests
             var copy = SerializerClone(dic);
 
             Assert.AreEqual(3, copy.Count);
+        }
+
+        [Test]
+        public void ShouldSerializeDictionaryReferencingItself()
+        {
+            var dic = new Dictionary<CustomObject, string>();
+            var firstKey = new CustomObject(new object());
+            dic.Add(firstKey, "test1");
+            dic.Add(new CustomObject(new object()), "test2");
+            dic.Add(new CustomObject(new object()), "test3");
+            dic.Add(new CustomObject(new Dictionary<CustomObject, string> { { firstKey, "test5" } }), "test4");
+
+            var copy = SerializerClone(dic);
+
+            Assert.AreEqual(4, copy.Count);
         }
 
         [Test]

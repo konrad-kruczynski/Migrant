@@ -38,6 +38,7 @@ using Migrantoid.Utilities;
 using Migrantoid.Generators;
 using Migrantoid.VersionTolerance;
 using Migrantoid.Customization;
+using System.Runtime.CompilerServices;
 
 namespace Migrantoid
 {
@@ -67,6 +68,7 @@ namespace Migrantoid
             Methods = new IdentifiedElementsList<MethodDescriptor>(this);
             Assemblies = new IdentifiedElementsList<AssemblyDescriptor>(this);
             Modules = new IdentifiedElementsList<ModuleDescriptor>(this);
+            HashCodeBasedWaitingValues = new Dictionary<int, (object Dictionary, object Value)>();
             latePostDeserializationHooks = new List<Action>();
 
             reader = new PrimitiveReader(stream, useBuffering);
@@ -167,9 +169,15 @@ namespace Migrantoid
                     soFarDeserialized[i] = new WeakReference(deserializedObjects[i]);
                 }
             }
+
             if(referencePreservation != ReferencePreservation.Preserve)
             {
                 deserializedObjects = null;
+            }
+
+            if (HashCodeBasedWaitingValues.Count != 0)
+            {
+                throw new InvalidOperationException(InternalErrorMessage);
             }
         }
 
@@ -232,6 +240,14 @@ namespace Migrantoid
                 // this may happen with empty delegates
                 return;
             }
+
+            if (HashCodeBasedWaitingValues.TryGetValue(refId, out var dictionaryAndValue))
+            {
+                HashCodeBasedWaitingValues.Remove(refId);
+                var dictionaryType = dictionaryAndValue.Dictionary.GetType();
+                readMethods.addHashCodeBasedDeferredElementProvider.GetOrCreate(dictionaryType)(dictionaryAndValue.Dictionary, currentObject, dictionaryAndValue.Value);
+            }
+
             var type = currentObject.GetType();
             readMethods.completeMethodsProvider.GetOrCreate(type)(this, refId);
         }
@@ -322,7 +338,7 @@ namespace Migrantoid
             }
 
             // so we can assume it is ICollection<T> or ICollection
-            FillCollection(token.FormalElementType, objectId);
+            FillCollection(token, objectId);
         }
 
         internal object GetObjectByReferenceId(int refId, bool forceDeserializedObject = false)
@@ -397,6 +413,24 @@ namespace Migrantoid
             objectsWrittenInlineCount++;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal int GetObjectDebt()
+        {
+            return GetNewestObjectId() - objectsWrittenInlineCount;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal int GetNewestObjectId()
+        {
+            return deserializedObjects.Count - 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void AddHashCodeBasedWaitingValue(object dictionary, int keyId, object value)
+        {
+            HashCodeBasedWaitingValues.Add(keyId, (dictionary, value));
+        }
+
         private object ReadField(Type formalType)
         {
             if(Helpers.IsTransient(formalType))
@@ -414,17 +448,20 @@ namespace Migrantoid
                 }
                 return GetObjectByReferenceId(refId, true);
             }
+
             if(formalType.IsEnum)
             {
                 var value = ReadField(Enum.GetUnderlyingType(formalType));
                 return Enum.ToObject(formalType, value);
             }
+
             var nullableActualType = Nullable.GetUnderlyingType(formalType);
             if(nullableActualType != null)
             {
                 var isNotNull = reader.ReadBoolean();
                 return isNotNull ? ReadField(nullableActualType) : null;
             }
+
             if(Helpers.IsWriteableByPrimitiveWriter(formalType))
             {
                 var methodName = string.Concat("Read", formalType.Name);
@@ -456,11 +493,12 @@ namespace Migrantoid
             return false;
         }
 
-        private void FillCollection(Type elementFormalType, int objectId)
+        private void FillCollection(CollectionMetaToken collectionToken, int objectId)
         {
             var obj = GetObjectByReferenceId(objectId);
             var collectionType = obj.GetType();
             var count = reader.ReadInt32();
+            var elementFormalType = collectionToken.FormalElementType;
 
             if(collectionType == typeof(Stack) ||
             (collectionType.IsGenericType && collectionType.GetGenericTypeDefinition() == typeof(Stack<>)))
@@ -477,17 +515,15 @@ namespace Migrantoid
                 }
             }
             else
-            {
-                var addMethod = collectionType.GetMethod("Add", new[] { elementFormalType }) ??
-                                              collectionType.GetMethod("Enqueue", new[] { elementFormalType }) ??
-                                              collectionType.GetMethod("Push", new[] { elementFormalType });
-                if(addMethod == null)
-                {
-                    throw new InvalidOperationException(string.Format(CouldNotFindAddErrorMessage,
-                                                                  collectionType));
-                }
+            {                
+                var addMethod = collectionToken.AddMethod;
+
                 Type delegateType;
-                if(addMethod.ReturnType == typeof(void))
+                if (collectionToken.IsDictionary)
+                {
+                    delegateType = typeof(Action<,>).MakeGenericType(new[] { collectionToken.FormalKeyType, collectionToken.FormalValueType });
+                }
+                else if(addMethod.ReturnType == typeof(void))
                 {
                     delegateType = typeof(Action<>).MakeGenericType(new[] { elementFormalType });
                 }
@@ -502,11 +538,44 @@ namespace Migrantoid
                 var addDelegate = Delegate.CreateDelegate(delegateType, obj, addMethod);
                 for(var i = 0; i < count; i++)
                 {
-                    var value = ReadField(elementFormalType);
-                    addDelegate.DynamicInvoke(value);
+                    int currentId = 0, oldDebt = 0, newDebt = 0;
+                    var value = default(object);
+                    if (collectionToken.IsHashCodeBased)
+                    {
+                        currentId = GetNewestObjectId();
+                        oldDebt = GetObjectDebt();
+                    }
+
+                    var keyOrValueIfNotDictionary = ReadField(collectionToken.IsDictionary ? collectionToken.FormalKeyType : collectionToken.FormalElementType);
+                    
+                    if (collectionToken.IsHashCodeBased)
+                    {
+                        newDebt = GetObjectDebt();
+                    }
+
+                    if (collectionToken.IsDictionary)
+                    {
+                        value = ReadField(collectionToken.FormalValueType);
+                    }
+
+                    if(oldDebt == newDebt)
+                    {
+                        if(collectionToken.IsDictionary)
+                        {
+                            addDelegate.DynamicInvoke(keyOrValueIfNotDictionary, value);
+                        }
+                        else
+                        {
+                            addDelegate.DynamicInvoke(keyOrValueIfNotDictionary);
+                        }
+                    }
+                    else
+                    {
+                        AddHashCodeBasedWaitingValue(obj, currentId + 1, value);
+                    }
                 }
             }
-        }
+        }        
 
         private void ReadMetadataAndTouchArray(Type elementFormalType, int objectId)
         {
@@ -737,8 +806,10 @@ namespace Migrantoid
         internal AutoResizingList<object> deserializedObjects;
         internal readonly OneToOneMap<int, object> surrogatesWhileReading;
         internal readonly Serializer.ReadMethods readMethods;
+        internal readonly Dictionary<int, (object Dictionary, object Value)> HashCodeBasedWaitingValues;
         internal int objectsWrittenInlineCount;
         internal IDictionary<Type, Recipe> recipes;
+
 
         private readonly Func<TypeDescriptor> readTypeMethod;
         private List<TypeDescriptor> types;
@@ -749,7 +820,6 @@ namespace Migrantoid
 
         private const int InitialCapacity = 128;
         private const string InternalErrorMessage = "Internal error: should not reach here.";
-        private const string CouldNotFindAddErrorMessage = "Could not find suitable Add method for the type {0}.";
 
         internal enum CreationWay
         {
@@ -763,6 +833,7 @@ namespace Migrantoid
     internal delegate void CompleteMethodDelegate(ObjectReader reader, int objectId);
     internal delegate void TouchInlinedObjectMethodDelegate(ObjectReader reader, int objectId);
     internal delegate object CreateObjectMethodDelegate();
+    internal delegate void AddDeferredHashCodeBasedElementDelegate(object dictionary, object key, object value);
 
     internal delegate void CloneMethodDelegate(object src, object dst);
 }

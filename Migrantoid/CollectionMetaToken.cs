@@ -1,8 +1,10 @@
 /*
   Copyright (c) 2015-2016 Antmicro <www.antmicro.com>
+  Copyright (c) 2021 Konrad Kruczyński
 
   Authors:
    * Mateusz Holenko (mholenko@antmicro.com)
+   * Konrad Kruczyński (konrad.kruczynski@gmail.com)
 
   Permission is hereby granted, free of charge, to any person obtaining
   a copy of this software and associated documentation files (the
@@ -33,9 +35,11 @@ using System.Collections;
 
 namespace Migrantoid
 {
-    internal class CollectionMetaToken
+    internal sealed class CollectionMetaToken
     {
         public bool IsDictionary { get; private set; }
+
+        public bool IsHashCodeBased { get; private set; }
 
         public bool IsGeneric { get; private set; }
 
@@ -45,7 +49,9 @@ namespace Migrantoid
 
         public Type FormalValueType { get; private set; }
 
-        public MethodInfo CountMethod { get; set; }
+        public MethodInfo CountMethod { get; private set; }
+
+        public MethodInfo AddMethod { get; private set; }
 
         public Type ActualType { get; private set; }
 
@@ -55,17 +61,29 @@ namespace Migrantoid
             FormalElementType = typeof(object);
             FormalKeyType = typeof(object);
             FormalValueType = typeof(object);
+            IsHashCodeBased = CheckIfHashCodeBased(actualType);
 
             var ifaces = actualType.GetInterfaces();
-            foreach(var prior in CollectionPriorities)
+            foreach(var priority in CollectionPriorities)
             {
                 // there is really no access to modified closure as NRefactory suggests
-                var iface = ifaces.FirstOrDefault(x => (x.IsGenericType ? x.GetGenericTypeDefinition() : x) == prior.Item1);
-                if(iface != null)
+                var iface = ifaces.FirstOrDefault(x => (x.IsGenericType ? x.GetGenericTypeDefinition() : x) == priority.Type);
+                if (iface == null)
                 {
-                    prior.Item2(iface, this);
-                    return;
+                    continue;
                 }
+
+                priority.MetaTokenFactory(iface, this);
+                if(AddMethod == null)
+                {
+                    // There is no interface-based Add method. Let's look for a suitable one.
+                    AddMethod = actualType.GetMethod("Add", new[] { FormalElementType })
+                        ?? actualType.GetMethod("Enqueue", new[] { FormalElementType })
+                        ?? actualType.GetMethod("Push", new[] { FormalElementType })
+                        ?? throw new InvalidOperationException($"Could not find suitable Add method for the type {actualType}.");
+                }
+
+                return;
             }
         }
 
@@ -92,6 +110,17 @@ namespace Migrantoid
             return true;
         }
 
+        private static bool CheckIfHashCodeBased(Type type)
+        {
+            if (!type.IsGenericType)
+            {
+                return type == typeof(Hashtable);
+            }
+
+            var genericTypeDefinition = type.GetGenericTypeDefinition();
+            return genericTypeDefinition == typeof(Dictionary<,>) || genericTypeDefinition == typeof(HashSet<>);
+        }
+
         static CollectionMetaToken()
         {
             var speciallySerializedTypes = new [] {
@@ -115,38 +144,52 @@ namespace Migrantoid
         // this set is generated automatically from `SpeciallySerializedCollections` collection in order to speed up lookups based on `TypeDescriptor`
         private static readonly HashSet<string> SpeciallySerializedCollectionsAQNs;
 
-        private static readonly Tuple<Type, Action<Type, CollectionMetaToken>>[] CollectionPriorities = 
+        private static readonly (Type Type, Action<Type, CollectionMetaToken> MetaTokenFactory)[] CollectionPriorities =
         {
-            Tuple.Create<Type, Action<Type, CollectionMetaToken>>(typeof(IDictionary<,>), 
+            (
+                typeof(IDictionary<,>),
                 (iface, cmt) => {
                     cmt.IsDictionary = true;
                     cmt.IsGeneric = true;
                     var arguments = iface.GetGenericArguments();
                     cmt.FormalKeyType = arguments[0];
                     cmt.FormalValueType = arguments[1];
+                    cmt.FormalElementType = typeof(KeyValuePair<,>).MakeGenericType(arguments[0], arguments[1]);
                     cmt.CountMethod = typeof(ICollection<>).MakeGenericType(typeof(KeyValuePair<,>).MakeGenericType(arguments[0], arguments[1])).GetProperty("Count").GetGetMethod();
-                }),
-            Tuple.Create<Type, Action<Type, CollectionMetaToken>>(typeof(ICollection<>),
+                    cmt.AddMethod = iface.GetMethod("Add");
+                }
+            ),
+            (
+                typeof(ICollection<>),
                 (iface, cmt) => {
                     cmt.IsGeneric = true;
                     cmt.FormalElementType = iface.GetGenericArguments()[0];
                     cmt.CountMethod = iface.GetProperty("Count").GetGetMethod();
+                    cmt.AddMethod = iface.GetMethod("Add");
                 }),
-            Tuple.Create<Type, Action<Type, CollectionMetaToken>>(typeof(IEnumerable<>),
+            (
+                typeof(IEnumerable<>),
                 (iface, cmt) => {
                     cmt.IsGeneric = true;
                     cmt.FormalElementType = iface.GetGenericArguments()[0];
                     cmt.CountMethod = typeof(Enumerable).GetMethods().Single(m => m.GetParameters().Length == 1 && m.Name == "Count").MakeGenericMethod(iface.GetGenericArguments()[0]);
-                }),
-            Tuple.Create<Type, Action<Type, CollectionMetaToken>>(typeof(IDictionary),
+                }
+            ),
+            (
+                typeof(IDictionary),
                 (iface, cmt) => {
                     cmt.IsDictionary = true;
                     cmt.CountMethod = typeof(ICollection).GetProperty("Count").GetGetMethod();
-                }),
-            Tuple.Create<Type, Action<Type, CollectionMetaToken>>(typeof(ICollection),                 
+                    cmt.AddMethod = iface.GetMethod("Add");
+                }
+            ),
+            (
+                typeof(ICollection),
                 (iface, cmt) => {
                     cmt.CountMethod = typeof(ICollection).GetProperty("Count").GetGetMethod();
-                })
+                    cmt.AddMethod = iface.GetMethod("Add");
+                }
+            )
         };
 	}
 }

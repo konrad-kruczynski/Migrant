@@ -1,6 +1,6 @@
 /*
   Copyright (c) 2012 - 2016 Antmicro <www.antmicro.com>
-  Copyright (c) 2021, Konrad Kruczyński
+  Copyright (c) 2021 Konrad Kruczyński
 
   Authors:
    * Konrad Kruczynski (kkruczynski@antmicro.com)
@@ -498,19 +498,28 @@ namespace Migrantoid
                                 (int)collectionToken.CountMethod.Invoke(null, new[] { o }) :
                                 (int)collectionToken.CountMethod.Invoke(o, null);
 
-                    WriteEnumerable(collectionToken.FormalElementType, count, (IEnumerable)o);
+                    WriteEnumerable(collectionToken, count, (IEnumerable)o);
                     return true;
                 }
             }
             return false;
         }
 
-        private void WriteEnumerable(Type elementFormalType, int count, IEnumerable collection)
+        private void WriteEnumerable(CollectionMetaToken collectionToken, int count, IEnumerable collection)
         {
             writer.Write(count);
             foreach(var element in collection)
             {
-                WriteField(elementFormalType, element);
+                if (collectionToken.IsDictionary)
+                {
+                    var actualElementType = collectionToken.IsGeneric ? collectionToken.FormalElementType : typeof(DictionaryEntry);
+                    WriteField(collectionToken.FormalKeyType, actualElementType.GetProperty("Key").GetGetMethod().Invoke(element, new object[0]));
+                    WriteField(collectionToken.FormalValueType, actualElementType.GetProperty("Value").GetGetMethod().Invoke(element, new object[0]));
+                }
+                else
+                {
+                    WriteField(collectionToken.FormalElementType, element);
+                }
             }
         }
 
