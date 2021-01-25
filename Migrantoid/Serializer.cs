@@ -636,10 +636,10 @@ namespace Migrantoid
         internal readonly SwapList surrogatesForObjects;
         private readonly SwapList objectsForSurrogates;
         private readonly Dictionary<Type, Recipe> recipes;
-        private const byte VersionNumber = 10;
+        private const byte VersionNumber = 1;
         private const byte Magic1 = 0x32;
         private const byte Magic2 = 0x66;
-        private const byte Magic3 = 0x34;
+        private const byte Magic3 = 0x35;
 
         #if DEBUG_FORMAT
         public static readonly bool DumpStream = true;
