@@ -1,6 +1,7 @@
 ﻿// *******************************************************************
 //
-//  Copyright (c) 2012-2015, Antmicro Ltd <antmicro.com>
+// Copyright (c) 2012-2015 Antmicro
+// Copyright (c) 2015 Roger Johansson
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the
