@@ -15,3 +15,6 @@ jobs:
         dotnet-version: 5.0.202
     - name: Unit tests
       run: dotnet test Tests/Tests.csproj
+    - name: Performance tests
+      working-directory: ./PerformanceTests
+      run: dotnet run --configuration Release
